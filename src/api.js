@@ -204,6 +204,24 @@ export const api = {
     return { songs: listOf(songs, mapSong), albums: listOf(albums, mapAlbum), artists: listOf(artists, mapArtist) }
   },
 
+  // 播放事件上报。fnOS 官方前端用该端点写播放历史；fnmusic-ext 插件也依赖它把在线曲目
+  // 落进「最近播放」并驱动推荐，所以播放一首歌时同步上报一次。
+  reportPlay: (song) => call('/api/v1/event/report', {
+    method: 'POST',
+    body: {
+      events: [{
+        eventType: 'track_play',
+        payload: {
+          trackGUID: s(song?.id),
+          title: s(song?.title),
+          artist: s(song?.artist),
+          album: s(song?.album),
+          duration: Math.round(n(song?.duration) * 1000),
+        },
+      }],
+    },
+  }),
+
   // 歌词（返回 LRC 原文）
   lyric: async (songId) => {
     try {
