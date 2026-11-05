@@ -35,6 +35,20 @@ export function parseLrc(text) {
   return lines
 }
 
+// fnmusic-ext 在搜索结果标题前加的展示标记，只应出现在搜索列表里。
+// 播放队列进入前剥掉这些前缀，避免播放器、悬浮歌词、系统媒体信息带上来源字样。
+// 注意：只匹配插件会生成的固定来源 / VIP 标记，以及洛雪动态 `[脚本名-平台]`
+// （平台限 kw/kg/tx/wy/mg），不用泛化的 `[...]`，不误伤歌名本身的方括号。
+const LX_PLATFORMS = 'kw|kg|tx|wy|mg'
+const SOURCE_TITLE_RE = new RegExp(
+  `^(?:\\[music box\\] |\\[dl\\] |\\[lx\\] |\\[VIP\\] |\\[[^\\]\\r\\n]+-(?:${LX_PLATFORMS})\\] )+`,
+)
+
+export function stripSourceTitle(title) {
+  const raw = title === undefined || title === null ? '' : String(title)
+  return raw.replace(SOURCE_TITLE_RE, '')
+}
+
 // ---------- 封面主色（用于全屏播放页背景） ----------
 const colorCache = new Map()
 export function useCoverColor(coverId) {

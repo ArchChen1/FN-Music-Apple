@@ -19,6 +19,9 @@ describe('mapSong', () => {
     expect(s).toMatchObject({ id: 'abc', title: '晴天', artist: '周杰伦 / 客串', artistId: 'ar1', album: '叶惠美', albumId: 'al1', duration: 269, favorite: true, year: 2003, trackNo: 3, discNo: 0 })
   })
   it('丢弃无效的封面 ID，退回专辑封面', () => expect(s.coverId).toBe('album_ff00'))
+  it('保留搜索结果里的来源标记，供搜索列表原样展示', () => {
+    expect(mapSong({ ...raw, title: '[music box] 晴天' }).title).toBe('[music box] 晴天')
+  })
   it('编码缺失时取文件扩展名，码率换算为 kbps', () => {
     expect(s.codec).toBe('FLAC')
     expect(s.bitrate).toBe(922)
