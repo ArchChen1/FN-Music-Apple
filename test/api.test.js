@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { coverUrl, mapAlbum, mapArtist, mapPlaylist, mapSong, streamUrl } from '../src/api.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api, coverUrl, mapAlbum, mapArtist, mapPlaylist, mapSong, streamUrl } from '../src/api.js'
 
 describe('mapSong', () => {
   const raw = {
@@ -49,4 +49,37 @@ describe('资源地址', () => {
     expect(coverUrl('')).toBe('')
   })
   it('streamUrl 对 ID 编码', () => expect(streamUrl('a b')).toBe('fnm://srv/api/v1/track/stream?guid=a%20b'))
+})
+
+// 装了接管插件后搜索会等待在线音源聚合，客户端必须给搜索留出比普通接口更宽的超时，
+// 否则冷启动首次搜索会被渲染进程提前 abort（表现为「请求超时」但服务端仍在工作）。
+describe('搜索超时（适配 fnmusic-ext）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  // raw() 用 setTimeout(abort, timeout) 实现超时；从注册的定时器里读回每个请求的超时上限。
+  function stubFetchCapturingTimeouts() {
+    const timers = []
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((fn, ms) => {
+      const h = { fn, ms }
+      timers.push(h)
+      return h
+    })
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {}))) // 永不 resolve，保留请求在飞行中
+    return timers
+  }
+
+  it('search/track 与 search/album 使用更宽的超时，artist 仍是普通接口超时', async () => {
+    const timers = stubFetchCapturingTimeouts()
+    api.search('x').catch(() => {})
+    const searchTimeouts = timers.map((t) => t.ms).filter((ms) => ms > 15000)
+    expect(searchTimeouts.filter((ms) => ms === 25000)).toHaveLength(2)
+    expect(timers.some((t) => t.ms === 20000)).toBe(true) // search/artist 仍是普通 20s 兜底
+  })
+
+  it('普通接口（如专辑列表）仍是普通超时', async () => {
+    const timers = stubFetchCapturingTimeouts()
+    api.albumsPage(20).catch(() => {})
+    expect(timers.map((t) => t.ms)).toContain(20000)
+    expect(timers.every((t) => t.ms <= 20000)).toBe(true)
+  })
 })

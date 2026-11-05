@@ -12,12 +12,17 @@ let reloginPromise = null
 
 // 渲染进程侧的超时兜底：即使主进程的代理卡住，前端也不会无限等待。
 const REQUEST_TIMEOUT = 20000
+// 搜索是唯一会「等在线音源」的接口：插件在后台聚合，最长等 search_timeout(默认 15s)
+// 才回本地结果，冷启动首次搜索可能明显超过普通接口。给搜索单独放宽到 25s，
+// 并保持略小于主进程超时，避免主进程先中止请求。
+// TODO: 以后可考虑在设置项里允许用户自定义搜索超时时间。
+const SEARCH_TIMEOUT = 25000
 
-async function raw(path, { query, method = 'GET', body } = {}) {
+async function raw(path, { query, method = 'GET', body, timeout } = {}) {
   const url = new URL(BASE + path)
   if (query) for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null) url.searchParams.set(k, v)
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
+  const timer = setTimeout(() => controller.abort(), timeout || REQUEST_TIMEOUT)
   let json
   try {
     const res = await fetch(url, {
@@ -205,9 +210,10 @@ export const api = {
 
   // 搜索
   search: async (q) => {
+    // track 结果会并入在线音源，慢；album/artist 大多数是本地透传，仍用普通超时
     const [songs, albums, artists] = await Promise.all([
-      call('/api/v1/search/track', { query: { q, page: 1, size: 30 } }),
-      call('/api/v1/search/album', { query: { q, page: 1, size: 20 } }),
+      call('/api/v1/search/track', { query: { q, page: 1, size: 30 }, timeout: SEARCH_TIMEOUT }),
+      call('/api/v1/search/album', { query: { q, page: 1, size: 20 }, timeout: SEARCH_TIMEOUT }),
       call('/api/v1/search/artist', { query: { q, page: 1, size: 20 } }),
     ])
     return { songs: listOf(songs, mapSong), albums: listOf(albums, mapAlbum), artists: listOf(artists, mapArtist) }
