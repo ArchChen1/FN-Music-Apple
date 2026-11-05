@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtTime, fmtTotal, parseLrc, pickRandom, shuffled } from '../src/lib.js'
+import { fmtTime, fmtTotal, parseLrc, pickRandom, shuffled, stripSourceTitle } from '../src/lib.js'
 
 describe('fmtTime', () => {
   it.each([[0, '0:00'], [5.9, '0:05'], [65, '1:05'], [3600, '60:00'], [-3, '0:00'], [NaN, '0:00'], [Infinity, '0:00']])('%s → %s', (s, out) => expect(fmtTime(s)).toBe(out))
@@ -29,6 +29,27 @@ describe('parseLrc', () => {
   it('去掉行内的逐字时间标签', () => {
     expect(parseLrc('[00:01.00]你<00:01.20>好')[0].text).toBe('你<00:01.20>好')
     expect(parseLrc('[00:01.00]你[00:01.20]好')[0].text).toBe('你好')
+  })
+})
+
+describe('stripSourceTitle', () => {
+  it('剥掉 fnmusic-ext 的固定来源标记，保留原始歌名', () => {
+    expect(stripSourceTitle('[music box] 稻香')).toBe('稻香')
+    expect(stripSourceTitle('[dl] 晴天')).toBe('晴天')
+    expect(stripSourceTitle('[lx] 夜曲')).toBe('夜曲')
+  })
+
+  it('支持 VIP / 来源叠加，以及洛雪动态脚本-平台标记', () => {
+    expect(stripSourceTitle('[VIP] 新歌')).toBe('新歌')
+    expect(stripSourceTitle('[music box] [VIP] 新歌')).toBe('新歌')
+    expect(stripSourceTitle('[墨澜-kg] 晴天')).toBe('晴天')
+    expect(stripSourceTitle('[云海源-kw] [VIP] 七里香')).toBe('七里香')
+  })
+
+  it('只精确剥已知来源，不误伤歌名自己的方括号或未知脚本平台', () => {
+    expect(stripSourceTitle('[Live] 晴天')).toBe('[Live] 晴天')
+    expect(stripSourceTitle('歌名 [demo]')).toBe('歌名 [demo]')
+    expect(stripSourceTitle('[未知脚本-xx] 晴天')).toBe('[未知脚本-xx] 晴天')
   })
 })
 
