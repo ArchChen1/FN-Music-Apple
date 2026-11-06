@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { api, streamUrl, invalidate } from './api'
 import { acquireCover, prefetchCover } from './covers'
 import { lineAt, loadLyrics } from './lyrics'
-import { shuffled } from './lib'
+import { shuffled, stripSourceTitle } from './lib'
 import { applyMotion } from './motion'
 import { DEFAULT_WALLPAPER, applyPalette, isPalette } from './appearance'
 
@@ -187,11 +187,16 @@ export const useAuth = create((set) => ({
 }))
 
 // ---------- 播放器 ----------
+// 搜索结果可能带 fnmusic-ext 的来源 / VIP 展示前缀；播放队列只存原始标题。
+const cleanPlaySong = (song) => ({ ...song, title: stripSourceTitle(song?.title) })
+
 const saved = LS.get('queue', { queue: [], index: -1 })
+const savedQueue = (saved.queue || []).map(cleanPlaySong)
+const savedOriginal = (saved.original || saved.queue || []).map(cleanPlaySong)
 
 export const usePlayer = create((set, get) => ({
-  queue: saved.queue || [],
-  original: saved.original || saved.queue || [],
+  queue: savedQueue,
+  original: savedOriginal,
   index: saved.index ?? -1,
   playing: false,
   loading: false,
@@ -227,14 +232,15 @@ export const usePlayer = create((set, get) => ({
   play(songs, startIndex = 0, { shuffle } = {}) {
     if (!songs.length) return
     const useShuffle = shuffle ?? get().shuffle
-    let queue = songs
+    const cleanSongs = songs.map(cleanPlaySong)
+    let queue = cleanSongs
     let index = startIndex
     if (useShuffle) {
-      const first = songs[startIndex]
-      queue = [first, ...shuffled(songs.filter((_, i) => i !== startIndex))]
+      const first = cleanSongs[startIndex]
+      queue = [first, ...shuffled(cleanSongs.filter((_, i) => i !== startIndex))]
       index = 0
     }
-    set({ queue, original: songs, index, shuffle: useShuffle })
+    set({ queue, original: cleanSongs, index, shuffle: useShuffle })
     LS.set('shuffle', useShuffle)
     get()._load(queue[index])
     get()._persist()
@@ -253,9 +259,10 @@ export const usePlayer = create((set, get) => ({
   playNext(songs) {
     const { queue, index } = get()
     if (!queue.length) return get().play(songs, 0, { shuffle: false })
+    const add = songs.map(cleanPlaySong)
     const q = [...queue]
-    q.splice(index + 1, 0, ...songs)
-    set({ queue: q, original: [...get().original, ...songs] })
+    q.splice(index + 1, 0, ...add)
+    set({ queue: q, original: [...get().original, ...add] })
     get()._persist()
     useUI.getState().showToast('将在接下来播放')
   },
@@ -263,7 +270,8 @@ export const usePlayer = create((set, get) => ({
   addToQueue(songs) {
     const { queue } = get()
     if (!queue.length) return get().play(songs, 0, { shuffle: false })
-    set({ queue: [...queue, ...songs], original: [...get().original, ...songs] })
+    const add = songs.map(cleanPlaySong)
+    set({ queue: [...queue, ...add], original: [...get().original, ...add] })
     get()._persist()
     useUI.getState().showToast('已添加到播放队列')
   },

@@ -48,10 +48,18 @@ const verifyCert = (req, cb) => cb(trustedHosts.has(String(req.hostname).toLower
 // Chromium 对同一主机的连接池（HTTP/1.1 约 6 条），把其它无关请求也拖垮。
 const TIMEOUT = {
   api: 15000,   // 普通 JSON 接口：覆盖到响应体读取完成
+  // 搜索：fnmusic-ext 类接管插件会在后台聚合在线音源，最长等 search_timeout(默认 15s)
+  // 才回本地结果，冷启动首次搜索容易超过普通接口的 15s，单独放宽到 25s。
+  // TODO: 以后可考虑在设置项里允许用户自定义搜索超时时间。
+  search: 25000,
   cover: 30000, // 封面（NAS 现场生成缩略图可能较慢）
   stream: 30000,     // 音频流：仅覆盖到响应头返回
   streamIdle: 15000, // 音频流响应体的数据空闲上限：卡住不传就中止，释放连接
 }
+
+// 按路径选择 JSON 接口超时：搜索 / 搜索建议可能等待在线音源，其余仍是普通接口超时。
+const apiTimeoutFor = (pathname) =>
+  /^\/api\/v1\/search\/(track|album|artist|suggest)\b/.test(pathname) ? TIMEOUT.search : TIMEOUT.api
 
 // 带签名的 JSON 请求（主进程内部使用）
 async function apiFetch(base, apiPath, { method = 'GET', body, token } = {}) {
@@ -444,7 +452,7 @@ function registerProxy() {
         return proxyError(e)
       }
     }
-    const { signal, clear } = abortAfter(TIMEOUT.api)
+    const { signal, clear } = abortAfter(apiTimeoutFor(u.pathname))
     try {
       const upstream = await net.fetch(target, { method: request.method, headers, body, bypassCustomProtocolHandlers: true, signal })
       const out = new Headers(upstream.headers)

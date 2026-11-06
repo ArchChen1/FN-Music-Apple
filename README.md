@@ -151,6 +151,12 @@ e2e/                 端到端测试
 
 飞牛音乐的 API 没有公开文档。本项目使用的接口参照了开源项目 [Liusound](https://github.com/silence-top/Liusound) 中的 fnOS 适配器。如果飞牛更新后接口有变化，请调整 `src/api.js`。
 
+### 兼容 fnmusic-ext 扩展
+
+[fnmusic-ext](https://github.com/javycoder/fnos_music_ext) 是一个可逆接管官方飞牛音乐服务的社区扩展，它在原生服务前加一层代理，为官方曲库补上在线音源、歌词与推荐。扩展采用**透明的 socket 接管**，把 `/music/api/v1/*` 原样转发并增强，因此本客户端无需改动数据模型即可直接使用。扩展聚合在线音源时，搜索最长等待 `FNMUSIC_SEARCH_TIMEOUT`（默认 15s）才回结果，客户端把搜索类接口的超时从普通接口的 15s 放宽到 25s，避免冷启动首次搜索被提前中止；见 `electron/main.js` 的 `apiTimeoutFor` 与 `src/api.js` 的 `SEARCH_TIMEOUT`。
+
+使用方式：在 NAS 上安装并启用 fnmusic-ext 后，本客户端照常连接同一 NAS 地址即可。
+
 ## 许可
 
 [MIT](LICENSE)
