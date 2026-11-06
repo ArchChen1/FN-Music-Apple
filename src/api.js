@@ -177,6 +177,7 @@ export const api = {
 
   // 歌曲
   songs: (onPage) => fetchAll('/api/v1/track/list', { sort: 'createdAt,desc' }, mapSong, onPage),
+  recentPlayed: async (size = 100) => songsOf(await call('/api/v1/play-history/list', { query: { page: 1, size } })),
   artistSongs: async (id, size = 200) => songsOf(await call('/api/v1/track/artist-detail/list', { query: { artistGUID: id, page: 1, size } })),
   favorites: async () => fillCovers(await fetchAll('/api/v1/favorite-track/list', { sort: 'favoriteAt,desc' }, mapSong)),
   genreSongs: async (guid, name) => {
@@ -203,6 +204,9 @@ export const api = {
   // 收藏
   setFavorite: (id, on) => call(on ? '/api/v1/favorite-track/create' : '/api/v1/favorite-track/delete', { method: 'POST', body: { trackGUID: id } }),
 
+  // 最近播放
+  removeFromRecentPlayed: (songIds) => call('/api/v1/play-history/delete', { method: 'POST', body: { trackGUIDs: songIds } }),
+
   // 搜索
   search: async (q) => {
     const [songs, albums, artists] = await Promise.all([
@@ -212,6 +216,24 @@ export const api = {
     ])
     return { songs: listOf(songs, mapSong), albums: listOf(albums, mapAlbum), artists: listOf(artists, mapArtist) }
   },
+
+  // 播放事件上报。fnOS 官方前端用该端点写播放历史；fnmusic-ext 插件也依赖它把在线曲目
+  // 落进「最近播放」并驱动推荐，所以播放一首歌时同步上报一次。
+  reportPlay: (song) => call('/api/v1/event/report', {
+    method: 'POST',
+    body: {
+      events: [{
+        eventType: 'track_play',
+        payload: {
+          trackGUID: s(song?.id),
+          title: s(song?.title),
+          artist: s(song?.artist),
+          album: s(song?.album),
+          duration: Math.round(n(song?.duration) * 1000),
+        },
+      }],
+    },
+  }),
 
   // 歌词（返回 LRC 原文）
   lyric: async (songId) => {
