@@ -4,8 +4,9 @@ import { useShallow } from 'zustand/react/shallow'
 import { api } from '../api'
 import { getAudio, usePlayer, useUI, useCurrent } from '../store'
 import { fmtTime, useCoverColor, useViewport } from '../lib'
-import { hasTranslation, karaokeFills, lineAt, loadLyrics, mergeSyllableLines, pickSyllableCandidate, toLines } from '../lyrics'
+import { hasTranslation, karaokeFills, karaokeWindowEnd, lineAt, loadLyrics, loadSyllablesProgressive, mergeSyllableLines, predictKaraokeLines, toLines } from '../lyrics'
 import { Cover, HeartIcon, Seg, Spinner, useSongMenu } from './common'
+import { smoothFills } from '../karaoke'
 import { closeFullPlayer, openFullPlayer } from '../motion'
 import * as Icon from '../icons'
 
@@ -267,51 +268,66 @@ function useLyrics(song) {
   const id = song?.id
   const translationEnabled = useUI((s) => s.experimental?.enabled)
   const syllablesEnabled = useUI((s) => s.syllables)
+  const syllablePredict = useUI((s) => s.syllablePredict)
   const syllablesDebug = useUI((s) => s.syllablesDebug)
   const sourceEnabled = useUI((s) => s.experimental?.sourceEnabled)
   const aiFallback = useUI((s) => s.experimental?.aiFallback)
   const [state, setState] = useState({ lines: [], loading: false })
+  const prevId = useRef(null)
   const meta = [song?.title, song?.artist, song?.album].join('\u0000')
   useEffect(() => {
-    if (!id) return setState({ lines: [], loading: false })
+    if (!id) { prevId.current = null; return setState({ lines: [], loading: false }) }
     let dead = false
-    setState((s) => ({ lines: translationEnabled ? s.lines : [], loading: !translationEnabled || !s.lines.length }))
-    // 主链路：普通 LRC；实验性逐字歌词打开时，后台再抓一份词级时间轴合并进来。
-    // 逐字抓取失败或没有数据时静默退回逐行歌词，不影响正常显示。
-    const base = loadLyrics(id, song, { translate: translationEnabled })
-    const enrich = async () => {
-      const lines = await base
-      if (dead) return lines
-      if (!syllablesEnabled) return lines
-      let merged = lines
+    // 只有真正切歌才清空（避免短暂显示上一首）；改设置（翻译 / 逐字开关）
+    // 时保留现有歌词，不闪一下空白。清空后立刻用本地原词占位，不等翻译 / 逐字。
+    const songChanged = prevId.current !== id
+    prevId.current = id
+    if (songChanged) setState({ lines: [], loading: true })
+    // 「智能逐字补全」：有真实词级时间的行原样保留，缺的行按字长 / 停顿预测。
+    const predict = (src) => (syllablePredict ? predictKaraokeLines(src, { duration: song?.duration || 0 }) : src)
+    const run = async () => {
+      // 1. 本地原词必须最先出，且不依赖翻译与逐字抓取——这就是「切歌不卡加载」。
+      const raw = await loadLyrics(id, song, { translate: false })
+      if (dead) return
+      // 开了「智能逐字补全」就直接先上预测结果，否则先显示普通逐行歌词。
+      setState({ lines: predict(raw), loading: false })
+
+      // 2. 翻译可能很慢（走 AI），完成后才替换；期间界面已经有原词可看。
+      let lines = raw
+      if (translationEnabled) {
+        const translated = await loadLyrics(id, song, { translate: true })
+        if (dead) return
+        if (translated !== raw) {
+          lines = translated
+          setState({ lines: predict(translated), loading: false })
+        }
+      }
+
+      // 3. 逐字：按用户排序流式抓取，到 90% 先显示、到 98% 停止；更好的结果静默替换。
+      if (!syllablesEnabled) return
       let reason = ''
+      let meta = null
       try {
-        const r = await window.fn?.lyricsSyllables?.({ title: song?.title, artist: song?.artist })
-        // console.debug 在 DevTools 默认 Info 级别下不可见，必须用 console.log；且只在调试开关开启时输出
-        if (r?.ok && syllablesDebug) console.log('[syllables 数据]', { source: r.source, lines: r.lines, candidates: r.candidates, debug: r.debug })
-        if (r?.ok && r.candidates?.length) {
-          const pick = pickSyllableCandidate(lines, r.candidates)
-          if (pick) merged = pick.merged
-          if (syllablesDebug) {
-            const cov = pick ? `${(pick.coverage * 100).toFixed(0)}%（${pick.source}/${pick.provider}）` : '0%'
-            reason = `选中 ${cov}${pick && pick.coverage < 0.85 ? '（无候选达 85%，取最高）' : ''}`
-            console.log('[syllables 选择]', { coverage: pick?.coverage, source: pick?.source, provider: pick?.provider })
-          }
-        } else if (syllablesDebug) {
-          const cands = r?.debug?.amll?.candidates?.length ? `AMLL 候选 ${r.debug.amll.candidates.length} 个都不够格（分数最高 ${r.debug.amll.candidates[0]?.score ?? 0}）` : ''
-          const provs = r?.debug?.liriqo?.providers?.length ? ` LiriQo 有 ${r.debug.liriqo.providers.join(' / ')} 但未达词级` : ''
-          reason = (cands + provs + '，退回逐行歌词').trim() || (r?.error ? `没有逐字数据（${r.error}）` : '所有来源都没有逐字数据，退回逐行歌词')
-          console.log('[syllables debug]', r?.debug)
+        const merged = await loadSyllablesProgressive(song, lines, (next, info) => {
+          if (dead) return
+          meta = info
+          setState({ lines: predict(next), loading: false })
+        })
+        if (dead) return
+        setState({ lines: predict(merged), loading: false })
+        if (syllablesDebug) {
+          reason = meta
+            ? `选中 ${(meta.coverage * 100).toFixed(0)}%（${meta.source}/${meta.provider}）${meta.coverage < 0.9 ? '（低于合格线，取最高）' : ''}`
+            : '所有来源都没有达到合格线的逐字数据，退回逐行歌词'
         }
       } catch (e) {
         if (syllablesDebug) reason = '逐字抓取失败：' + (e?.message || '未知错误') + '，退回逐行歌词'
       }
       if (syllablesDebug && reason) useUI.getState().showToast(`逐字调试 · ${song?.title || ''}：${reason}`)
-      return merged
     }
-    enrich().then((lines) => { if (!dead) setState({ lines, loading: false }) })
+    run()
     return () => { dead = true }
-  }, [id, translationEnabled, syllablesEnabled, syllablesDebug, sourceEnabled, aiFallback, meta]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [id, translationEnabled, syllablesEnabled, syllablePredict, syllablesDebug, sourceEnabled, aiFallback, meta]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return state
 }
@@ -336,6 +352,9 @@ export function LyricsView({ song, big = false }) {
 
   const active = useMemo(() => lineAt(lines, time + 0.25), [time, lines])
   const syllablesEnabled = useUI((s) => s.syllables)
+  const syllableStrict = useUI((s) => s.syllableStrict)
+  const syllableSmooth = useUI((s) => s.syllableSmooth)
+  const smoothMode = syllableStrict ? 'strict' : (syllableSmooth || 'normal')
   // 逐字扫色的丝滑关键：store 的 currentTime 只有 50~200ms 粒度，这里用
   // requestAnimationFrame 本地插值——以上次已知时间和 audio 实际流逝速度推进
   // 进度边，每帧重算 karaokeFills。暂停 / seek / 切歌时直接贴齐真实时间。
@@ -389,26 +408,21 @@ export function LyricsView({ song, big = false }) {
   // 用连续进度边直接写当前句每个词的铺色宽度。切句 / 无词数据时清理为普通文本。
   // 这是 AMLL Player / Apple Music Web 的成熟做法：结构交给 React，逐帧样式走 DOM。
   const karaokeActive = syllablesEnabled && active >= 0 && !!lines[active]?.words?.length
-  // 手动调试钩子：DevTools 里 wait __syllablesProbe('歌名','歌手') 直接看原始返回
+  // 手动调试钩子：DevTools 里 await __syllablesProbe('歌名','歌手') 直接看原始返回
   useEffect(() => {
     if (!syllablesDebug) return
-    window.__syllablesProbe = async (title, artist) => window.fn.lyricsSyllables({ title, artist: artist || '' })
+    window.__syllablesProbe = async (title, artist) => window.fn.lyricsSyllables({ title, artist: artist || '', duration: usePlayer.getState().duration || 0 })
     // 逐行对照：本地 LRC vs 远端逐字，Console.table 直接看哪些行没对上
     window.__syllablesCompare = async (localOverride) => {
       const s = usePlayer.getState()
       const song = s.queue[s.index]
-      if (!song) { console.log('[syllables 对照] 当前没有播放歌曲'); return null }
+      if (!song) return null
       const local = toLines(localOverride || await api.lyric(song.id))
-      const r = await window.fn.lyricsSyllables({ title: song.title, artist: song.artist })
+      const r = await window.fn.lyricsSyllables({ title: song.title, artist: song.artist, duration: song.duration || 0 })
       let stats = null
       const merged = r?.lines ? mergeSyllableLines(local, r.lines, (x) => { stats = x }) : local
-      console.log(`[syllables 对照] ${song.title} / ${song.artist}`)
-      console.log(`本地 ${local.length} 行，远端 ${r?.lines?.length || 0} 行，命中 ${stats?.matched ?? 0}，文本不符 ${stats?.skippedText ?? 0}，时间不符 ${stats?.skippedTime ?? 0}`)
-      console.table(merged.map((l, i) => ({
-        行: i + 1, 时间: l.time.toFixed(2), 本地: l.text, 有逐字: !!l.words,
-        远端: r?.lines?.[i]?.text || '', 远端时间: r?.lines?.[i]?.time != null ? r.lines[i].time.toFixed(2) : '',
-      })))
-      return { local, remote: r?.lines, merged, stats }
+      // 不做 console 输出：返回值在 DevTools 里可直接展开查看（避免刷屏 / 终端噪声）
+      return { song, local, remote: r?.lines, merged, stats }
     }
   }, [syllablesDebug])
   useEffect(() => {
@@ -417,21 +431,31 @@ export function LyricsView({ song, big = false }) {
     if (!el) return
     let raf = 0
     const line = lines[active]
+    const limit = karaokeWindowEnd(lines, active)
+    let shown = null
+    let lastT = null
     const step = () => {
-      const k = karaokeFills(line, (getAudio()?.currentTime || 0) + 0.25)
+      const now = (getAudio()?.currentTime || 0) + 0.25
+      // 拖动 / seek 导致时间回退时丢弃已显示宽度，让下一帧贴齐目标（允许回退）。
+      if (lastT != null && now < lastT - 0.05) shown = null
+      lastT = now
+      const k = karaokeFills(line, now, { smooth: smoothMode, limit })
+      // 只增不减 + 缓动：正常播放宽度绝不倒着褪色。
+      shown = smoothFills(shown, k?.fills || null)
       const fills = el.querySelectorAll(`[data-i="${active}"] .kw-fill`)
       fills.forEach((node, wi) => {
-        const f = k?.fills[wi] ?? 0
-        node.style.width = `${(f * 100).toFixed(2)}%`
+        const f = shown?.[wi] ?? 0
+        // 扫色方向交给 CSS：横排用 width，竖排用 height，都读这个变量。
+        node.style.setProperty('--fill', f.toFixed(4))
       })
       raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
     return () => {
       cancelAnimationFrame(raf)
-      el.querySelectorAll(`[data-i="${active}"] .kw-fill`).forEach((node) => { node.style.width = '0%' })
+      el.querySelectorAll(`[data-i="${active}"] .kw-fill`).forEach((node) => { node.style.setProperty('--fill', '0') })
     }
-  }, [karaokeActive, active, lines])
+  }, [karaokeActive, active, lines, smoothMode])
   // 译文补入（lines 引用变化）或翻译显隐时，译文行高度会连续变化，其余歌词随之平移。
   // 这里用变化前记录的位置做基准，在动画全程逐帧补偿滚动，把关注句锚定在原位置。
   // 注意：不能按“位移稳定”提前退出——动画启动的头一两帧高度尚未变化，

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { api, streamUrl, invalidate } from './api'
 import { acquireCover, prefetchCover } from './covers'
-import { hasNextLyric, hasTranslation, lyricFrame, loadLyrics, pickSyllableCandidate } from './lyrics'
+import { hasNextLyric, hasTranslation, lyricFrame, loadLyrics, loadSyllablesProgressive, predictKaraokeLines } from './lyrics'
 import { shuffled, stripSourceTitle } from './lib'
 import { applyMotion } from './motion'
 import { DEFAULT_WALLPAPER, applyPalette, isPalette } from './appearance'
@@ -56,9 +56,12 @@ export const useUI = create((set, get) => ({
   appearanceOpen: false,
   lyricsSettingsOpen: false,
   experimentalOpen: false,
-  experimental: { enabled: false, configured: false, sourceEnabled: true, aiFallback: true, baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', syllables: false },
+  experimental: { enabled: false, configured: false, sourceEnabled: true, aiFallback: true, baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', syllables: false, syllablePredict: false, syllableSources: ['amll', 'liriqo', 'kugou', 'netease', 'qq'] },
   syllables: false, // 实验性逐字歌词（AMLL TTML DB / LiriQo），关闭时退回逐行歌词
+  syllablePredict: LS.get('sylPredict', false), // 智能逐字补全：没有词级数据的行也按字长 / 停顿预测逐字动画
   syllablesDebug: LS.get('sylDebug', false), // 逐字歌词调试 toast：切歌时报告命中情况
+  syllableStrict: LS.get('sylStrict', false), // 严格匹配：逐字严格照抄源时间戳（默认关闭，关闭时做速度带平滑）
+  syllableSmooth: LS.get('sylSmooth', 'normal'), // 速度带挡位：mild / normal / strong（仅非严格时生效）
   floatingLyrics: false, // 悬浮歌词窗口是否开启（真实状态以主进程 prefs 为准）
   lyricsStyle: {}, // 悬浮歌词样式（主进程 prefs.lyricsStyle）
   lyricsStyleSeq: 0, // 丢弃过期样式写入响应，避免快速拖动滑块时旧值覆盖新值
@@ -145,6 +148,11 @@ export const useUI = create((set, get) => ({
       // 逐字歌词开关跟随主进程配置；首次使用时回退 localStorage
       const hasPref = typeof r.syllables === 'boolean'
       set({ syllables: hasPref ? r.syllables : LS.get('syllables', false) })
+      // 智能逐字补全同样跟随主进程配置；缺失时回退 localStorage
+      set({ syllablePredict: typeof r.syllablePredict === 'boolean' ? r.syllablePredict : LS.get('sylPredict', false) })
+      // 严格匹配 / 速度带挡位跟随主进程配置
+      set({ syllableStrict: typeof r.syllableStrict === 'boolean' ? r.syllableStrict : LS.get('sylStrict', false) })
+      set({ syllableSmooth: ['mild', 'normal', 'strong'].includes(r.syllableSmooth) ? r.syllableSmooth : LS.get('sylSmooth', 'normal') })
     }
     return r
   },
@@ -158,6 +166,22 @@ export const useUI = create((set, get) => ({
     set({ syllables: !!on })
     // 同时写进主进程 prefs（experimental 配置），重启后 loadExperimental 会恢复
     await window.fn.experimentalSet?.({ syllables: !!on }).catch(() => {})
+  },
+  async setSyllablePredict(on) {
+    LS.set('sylPredict', !!on)
+    set({ syllablePredict: !!on })
+    await window.fn.experimentalSet?.({ syllablePredict: !!on }).catch(() => {})
+  },
+  async setSyllableStrict(on) {
+    LS.set('sylStrict', !!on)
+    set({ syllableStrict: !!on })
+    await window.fn.experimentalSet?.({ syllableStrict: !!on }).catch(() => {})
+  },
+  async setSyllableSmooth(mode) {
+    const m = ['mild', 'normal', 'strong'].includes(mode) ? mode : 'normal'
+    LS.set('sylSmooth', m)
+    set({ syllableSmooth: m })
+    await window.fn.experimentalSet?.({ syllableSmooth: m }).catch(() => {})
   },
   toggleSyllablesDebug() {
     const on = !get().syllablesDebug
@@ -574,23 +598,27 @@ let lyricsReady = true
 let lastKey = ''
 let lastSync = { at: 0, time: 0, playing: false }
 
-// 悬浮歌词的逐字数据：远端候选按歌曲缓存（只抓一次网络），合并每次现场做——
-// 缓存合并结果会把「原词版」的行覆盖到译文版上，丢掉翻译。
-const syllableRemote = new Map()
+// 悬浮歌词的逐字数据：主进程按用户排序串行抓取，达到合格线（90%）就先把结果
+// 通过 broadcast 推给悬浮窗显示，达到优秀线（98%）停止后续来源；期间出现更好结果
+// 再次 broadcast（静默替换）。抓取与命中判定都在主进程完成，这里不重复请求。
 async function enrichSyllableLines(id, song, lines) {
   if (!song) return lines
-  let pending = syllableRemote.get(id)
-  if (!pending) {
-    pending = window.fn?.lyricsSyllables?.({ title: song.title, artist: song.artist }).catch(() => null)
-    syllableRemote.set(id, pending)
-    if (syllableRemote.size > 30) {
-      const oldest = syllableRemote.keys().next().value
-      syllableRemote.delete(oldest)
-    }
-  }
-  const r = await pending
-  if (!r?.ok || !r.candidates?.length) return lines
-  return pickSyllableCandidate(lines, r.candidates)?.merged || lines
+  // 「智能逐字补全」：有真实词级时间的行原样保留，缺的行按字长 / 停顿预测，
+  // 让整首歌都有逐字动画。没开这个开关时保持旧行为（只显示真实命中的行）。
+  const finish = (out) => (useUI.getState().syllablePredict
+    ? predictKaraokeLines(out, { duration: song.duration || 0 })
+    : out)
+  // 记录最近一次推送出去的最终数组：外层用引用比较决定要不要再 broadcast，
+  // 返回同一个引用可以避免「同一个结果广播两次」。
+  let last = null
+  const merged = await loadSyllablesProgressive(song, lines, (next) => {
+    // 流式结果：立即替换悬浮窗当前显示，让合格数据先出来，不再干等。
+    if (lyricFor !== id) return
+    last = finish(next)
+    lyricLines = last
+    broadcast()
+  })
+  return last || finish(merged)
 }
 
 function broadcast() {
@@ -607,7 +635,11 @@ function broadcast() {
       const run = async () => {
         const original = await loadLyrics(id, song, { translate: false })
         if (lyricFor !== id) return
-        lyricLines = original
+        // 0. 先广播未处理的本地歌词，切歌不再卡加载；若开了「智能逐字补全」，
+        //    直接叠加预测，保证「有开关就先按智能逐字走」的要求。
+        lyricLines = useUI.getState().syllables && useUI.getState().syllablePredict
+          ? predictKaraokeLines(original, { duration: song.duration || 0 })
+          : original
         lyricsReady = true
         broadcast()
         if (useUI.getState().experimental?.enabled) {
@@ -656,6 +688,10 @@ function broadcast() {
     // 关闭或该句没有 words 时为 null，payload 不会因此变大。
     lyricWords: ui.syllables ? frame.lyricWords || null : null,
     nextLyricWords: ui.syllables ? frame.nextLyricWords || null : null,
+    // 扫色平滑模式：严格匹配时 'strict'，否则取速度带挡位。悬浮窗据此与主窗口保持一致。
+    syllableSmooth: ui.syllables && !ui.syllableStrict ? (ui.syllableSmooth || 'normal') : 'strict',
+    // 当前句窗口右界（下一句起点）：悬浮窗做扫色平滑时限制不越过下一句。
+    lyricEnd: ui.syllables ? frame.lyricEnd ?? null : null,
     motion: ui.motion,
     palette: ui.palette,
   }
@@ -671,9 +707,13 @@ function broadcast() {
 usePlayer.subscribe(broadcast)
 useUI.subscribe((s, prev) => {
   const expChanged = s.experimental?.enabled !== prev.experimental?.enabled || s.experimental?.sourceEnabled !== prev.experimental?.sourceEnabled || s.experimental?.aiFallback !== prev.experimental?.aiFallback
+  const srcListChanged = s.experimental?.syllableSources?.join(',') !== prev.experimental?.syllableSources?.join(',')
   const sylChanged = s.syllables !== prev.syllables
-  if (expChanged || sylChanged) lyricFor = ''
-  if (s.motion !== prev.motion || s.palette !== prev.palette || expChanged || sylChanged) broadcast()
+  const predictChanged = s.syllablePredict !== prev.syllablePredict
+  // 严格匹配 / 速度带挡位只影响扫色观感，不必重抓数据；但要立刻广播给悬浮窗。
+  const smoothChanged = s.syllableStrict !== prev.syllableStrict || s.syllableSmooth !== prev.syllableSmooth
+  if (expChanged || sylChanged || srcListChanged || predictChanged) lyricFor = ''
+  if (s.motion !== prev.motion || s.palette !== prev.palette || expChanged || sylChanged || srcListChanged || predictChanged || smoothChanged) broadcast()
 })
 
 window.fn?.onPlayerCommand?.((cmd, arg) => {
@@ -705,6 +745,7 @@ export function restorePlayer() {
 }
 export const getAudio = () => audio
 export const useCurrent = () => usePlayer((s) => s.queue[s.index] || null)
+
 
 
 

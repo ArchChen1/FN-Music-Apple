@@ -6,7 +6,8 @@ const { createTray, BALL_MODES } = require('./tray')
 const { createBall } = require('./ball')
 const { createLyrics } = require('./lyricsWindow')
 const { createCoverCache, coverKey } = require('./coverCache')
-const { fetchSyllables } = require('./syllables')
+const { fetchSyllables, setSyllableCache } = require('./syllables')
+const { createSyllableCache } = require('./syllableCache')
 
 const isDev = process.env.NODE_ENV === 'development'
 // 自定义数据目录（自动化测试用，让每次测试都从干净的状态开始）
@@ -149,6 +150,18 @@ function writeExperimentalKey(key) {
   } catch {}
 }
 
+// 逐字数据源白名单：删除某个源后（如历史版本的 lrclib），
+// 老用户 prefs 里的残留 id 不能带进设置面板，否则序号错乱 / 出现幽灵源。
+const SYLLABLE_SOURCE_IDS = ['amll', 'liriqo', 'kugou', 'netease', 'qq']
+const cleanSyllableSources = (list) => {
+  const out = Array.isArray(list) ? list.filter((s) => SYLLABLE_SOURCE_IDS.includes(s)) : []
+  return out.length ? out : [...SYLLABLE_SOURCE_IDS]
+}
+
+// 速度带挡位白名单：与 electron/lyricsMerge.mjs 的 SMOOTH_SPREAD 保持一致。
+const SYLLABLE_SMOOTH_IDS = ['mild', 'normal', 'strong']
+const cleanSyllableSmooth = (v) => (SYLLABLE_SMOOTH_IDS.includes(v) ? v : 'normal')
+
 const experimentalDefaults = () => ({
   enabled: false,
   sourceEnabled: true,
@@ -157,6 +170,12 @@ const experimentalDefaults = () => ({
   model: 'deepseek-chat',
   hasKey: false,
   syllables: false,
+  syllablePredict: false,
+  syllableSources: ['amll', 'liriqo', 'kugou', 'netease', 'qq'],
+  // 严格匹配：默认关闭。关闭时对逐字时间轴做速度带平滑（视觉匀速），开启时逐字严格照抄源时间戳。
+  syllableStrict: false,
+  // 速度带挡位（仅在非严格时生效）：mild 宽松 / normal 适中 / strong 更匀。
+  syllableSmooth: 'normal',
 })
 
 function experimentalRead() {
@@ -170,6 +189,10 @@ function experimentalRead() {
     model: e.model || 'deepseek-chat',
     hasKey: !!readExperimentalKey(),
     syllables: !!e.syllables,
+    syllablePredict: !!e.syllablePredict,
+    syllableSources: cleanSyllableSources(e.syllableSources),
+    syllableStrict: !!e.syllableStrict,
+    syllableSmooth: cleanSyllableSmooth(e.syllableSmooth),
   }
 }
 
@@ -182,6 +205,10 @@ function experimentalWrite(patch) {
     baseUrl: String(patch.baseUrl ?? cur.baseUrl ?? '').trim(),
     model: String(patch.model ?? cur.model ?? '').trim(),
     syllables: patch.syllables === undefined ? cur.syllables : !!patch.syllables,
+    syllablePredict: patch.syllablePredict === undefined ? cur.syllablePredict : !!patch.syllablePredict,
+    syllableSources: patch.syllableSources === undefined ? cur.syllableSources : cleanSyllableSources(patch.syllableSources),
+    syllableStrict: patch.syllableStrict === undefined ? cur.syllableStrict : !!patch.syllableStrict,
+    syllableSmooth: patch.syllableSmooth === undefined ? cur.syllableSmooth : cleanSyllableSmooth(patch.syllableSmooth),
   }
   if (patch.apiKey !== undefined) writeExperimentalKey(String(patch.apiKey || '').trim())
   writePrefs({ ...readPrefs(), experimental: next })
@@ -858,6 +885,7 @@ const chooseLyricsBackground = (win) => chooseImage(win, { title: '选择悬浮�
 
 // ---------- 封面磁盘缓存 ----------
 let covers = null
+let syllableCache = null
 const signedGet = async (url) => {
   const headers = { authx: authx('GET', url) }
   if (state.token) headers.Cookie = `music-token=${state.token}`
@@ -1101,7 +1129,17 @@ function registerIpc() {
       }
     } catch (e) { return { ok: false, error: e.message } }
   })
-    ipcMain.handle('lyrics:syllables', (_e, payload = {}) => fetchSyllables({ ...payload, debug: true }))
+    ipcMain.handle('lyrics:syllables', (e, payload = {}) => {
+      // 流式：主进程按用户排序逐源抓取，覆盖率用渲染层传来的本地 LRC 计算。
+      // 达到合格线先推一版给界面显示，达到优秀线停止后续来源；期间出现更好结果继续推。
+      const sender = e.sender
+      return fetchSyllables({
+        ...payload,
+        sources: readPrefs().experimental?.syllableSources,
+        debug: true,
+        onProgress: (data) => { if (sender && !sender.isDestroyed()) sender.send('lyrics:syllables-progress', data) },
+      })
+    })
   if (isDev) ipcMain.handle('dev:set-session', (_e, { base, token } = {}) => { Object.assign(state, { base, token, mode: 'dev', username: 'dev' }); return { ok: true } })
   ipcMain.handle('prefs:set', (_e, p) => { writePrefs({ ...readPrefs(), ...p }); syncBall(); syncLyrics(); if (p && p.lyricsStyle) lyricsWin?.setStyle(readPrefs().lyricsStyle); tray?.refresh(); return true })
   ipcMain.handle('tray:info', () => ({ available: !!tray, closeToTray: closeToTray(), ballMode: ballMode(), lyricsOn: lyricsOn() }))
@@ -1153,16 +1191,7 @@ function createWindow() {
       autoplayPolicy: 'no-user-gesture-required',
     },
   })
-  if (isDev) { // 开发模式下允许 F12 打开 DevTools 排查问题（生产构建不受影响）
-    // 等窗口真正显示后再弹 DevTools，避免在 ready-to-show 之前打开被吞掉
-    win.once('ready-to-show', () => {
-      win.webContents.openDevTools({ mode: 'detach' })
-      console.log('[dev] DevTools 已打开（F12 可随时开关）')
-      // 渲染进程 console → 终端：自动化调试时能直接看到前端的逐字调试输出
-      win.webContents.on('console-message', (_e, level, message) => {
-        if (String(message).includes('[syllables')) console.log(`[renderer] ${message}`)
-      })
-    })
+  if (isDev) { // 开发模式允许按 F12 手动打开 DevTools（生产构建不受影响）；不再自动弹出
     win.webContents.on('before-input-event', (_e, input) => {
       if (input.type === 'keyDown' && input.key === 'F12') {
         win.webContents.isDevToolsOpened() ? win.webContents.closeDevTools() : win.webContents.openDevTools({ mode: 'detach' })
@@ -1237,6 +1266,9 @@ if (!gotLock) {
     session.defaultSession.setUserAgent(app.userAgentFallback)
     session.fromPartition(OAUTH_PARTITION).setUserAgent(app.userAgentFallback)
     covers = createCoverCache({ dir: path.join(app.getPath('userData'), 'covers'), fetchUpstream: signedGet })
+    syllableCache = createSyllableCache({ dir: path.join(app.getPath('userData'), 'syllables') })
+    setSyllableCache(syllableCache)
+    syllableCache.init()
     covers.init()
     registerProxy()
     registerIpc()
@@ -1248,3 +1280,4 @@ if (!gotLock) {
   })
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 }
+
