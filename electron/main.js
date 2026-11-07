@@ -143,6 +143,7 @@ const experimentalDefaults = () => ({
   model: 'deepseek-chat',
   hasKey: false,
   syllables: false,
+  syllablePredict: false,
   syllableSources: ['amll', 'liriqo', 'kugou', 'netease', 'qq'],
 })
 
@@ -157,6 +158,7 @@ function experimentalRead() {
     model: e.model || 'deepseek-chat',
     hasKey: !!readExperimentalKey(),
     syllables: !!e.syllables,
+    syllablePredict: !!e.syllablePredict,
     syllableSources: cleanSyllableSources(e.syllableSources),
   }
 }
@@ -170,6 +172,7 @@ function experimentalWrite(patch) {
     baseUrl: String(patch.baseUrl ?? cur.baseUrl ?? '').trim(),
     model: String(patch.model ?? cur.model ?? '').trim(),
     syllables: patch.syllables === undefined ? cur.syllables : !!patch.syllables,
+    syllablePredict: patch.syllablePredict === undefined ? cur.syllablePredict : !!patch.syllablePredict,
     syllableSources: patch.syllableSources === undefined ? cur.syllableSources : cleanSyllableSources(patch.syllableSources),
   }
   if (patch.apiKey !== undefined) writeExperimentalKey(String(patch.apiKey || '').trim())
