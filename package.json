@@ -1,6 +1,6 @@
 {
   "name": "fn-music-apple",
-  "version": "1.2.2",
+  "version": "1.2.2-beta.1",
   "description": "飞牛音乐 Windows 桌面客户端 · Apple Music 风格",
   "main": "electron/main.js",
   "author": "FN Music",
@@ -60,13 +60,15 @@
         {
           "target": "nsis",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         },
         {
           "target": "portable",
           "arch": [
-            "x64"
+            "x64",
+            "arm64"
           ]
         }
       ]
@@ -77,13 +79,13 @@
       "perMachine": false,
       "shortcutName": "飞牛音乐",
       "uninstallDisplayName": "飞牛音乐",
-      "artifactName": "FN-Music-Setup-${version}.${ext}"
+      "artifactName": "FN-Music-Setup-${version}-${arch}.${ext}"
     },
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
     "portable": {
-      "artifactName": "FN-Music-Portable-${version}.${ext}"
+      "artifactName": "FN-Music-Portable-${version}-${arch}.${ext}"
     }
   },
   "engines": {
