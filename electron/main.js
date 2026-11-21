@@ -186,6 +186,22 @@ function syncLyrics() {
   if (!lyricsWin) return
   lyricsWin.setVisible(!quitting && lyricsOn())
 }
+// 任务栏悬停预览用的封面（比托盘菜单那张大，铺满整个预览窗）
+async function coverArt(coverId) {
+  if (!covers || !state.base) return null
+  const fetchCover = async (size) => {
+    const r = await covers.get(coverKey(state.base, coverId, size), `${state.base}/api/v1/static/cover?coverId=${encodeURIComponent(coverId)}&size=${size}`)
+    if (r.status !== 200 || !r.body.length) return null
+    const img = nativeImage.createFromBuffer(r.body)
+    return img.isEmpty() ? null : img
+  }
+  // 大图取不到（接口不支持这个尺寸、格式解不开）时退回 160 那张再放大，至少不是空图
+  const big = await fetchCover(320)
+  if (big) return big
+  const small = await fetchCover(160)
+  return small ? small.resize({ width: 320, height: Math.round((320 * small.getSize().height) / small.getSize().width), quality: 'best' }) : null
+}
+
 // 托盘菜单里显示的当前歌曲封面（从封面磁盘缓存读取）
 async function coverImage(coverId) {
   if (!covers || !state.base) return null
@@ -747,7 +763,7 @@ if (!gotLock) {
     covers.init()
     registerProxy()
     registerIpc()
-    thumbar = createThumbar({ command: playerCommand })
+    thumbar = createThumbar({ command: playerCommand, coverArt })
     mainWindow = createWindow()
     setupTray()
     setupBall()

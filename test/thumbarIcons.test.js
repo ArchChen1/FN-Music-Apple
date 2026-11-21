@@ -11,7 +11,7 @@ describe('thumbarIcons', () => {
     expect(NAMES).toEqual(['prev', 'play', 'pause', 'next'])
     expect(SIZES).toEqual([16, 20, 24, 32, 40, 48])
     expect(COLORS).toEqual({ dark: '#ffffff', light: '#1f1f1f' })
-  })
+  }) 
 
   it('按尺寸与主题生成合法 SVG', () => {
     for (const name of NAMES) {
