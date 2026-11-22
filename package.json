@@ -52,6 +52,7 @@
       "electron/**/*",
       "build/icon.png",
       "build/tray/*.png",
+      "src/iconShapes.json",
       "package.json"
     ],
     "win": {
@@ -88,5 +89,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "koffi": "^3.3.8"
   }
 }

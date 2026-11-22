@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const { sha256, newDeviceId, normalizeBase, hostOf, authx, abortAfter, streamWithIdle, friendlyError } = require('./util')
 const { createTray, BALL_MODES } = require('./tray')
+const { createThumbar } = require('./thumbar')
 const { createBall } = require('./ball')
 const { createLyrics } = require('./lyricsWindow')
 const { createCoverCache, coverKey } = require('./coverCache')
@@ -133,6 +134,7 @@ function writePrefs(p) {
 // ---------- 主窗口、托盘与悬浮球 ----------
 let mainWindow = null
 let tray = null
+let thumbar = null
 let ball = null
 let lyricsWin = null
 let mainHidden = false // 主窗口被用户隐藏到托盘或最小化（启动时窗口还没显示出来不算）
@@ -192,6 +194,22 @@ function syncLyrics() {
   if (!lyricsWin) return
   lyricsWin.setVisible(!quitting && lyricsOn())
 }
+// 任务栏悬停预览用的封面（比托盘菜单那张大，铺满整个预览窗）
+async function coverArt(coverId) {
+  if (!covers || !state.base) return null
+  const fetchCover = async (size) => {
+    const r = await covers.get(coverKey(state.base, coverId, size), `${state.base}/api/v1/static/cover?coverId=${encodeURIComponent(coverId)}&size=${size}`)
+    if (r.status !== 200 || !r.body.length) return null
+    const img = nativeImage.createFromBuffer(r.body)
+    return img.isEmpty() ? null : img
+  }
+  // 大图取不到（接口不支持这个尺寸、格式解不开）时退回 160 那张再放大，至少不是空图
+  const big = await fetchCover(320)
+  if (big) return big
+  const small = await fetchCover(160)
+  return small ? small.resize({ width: 320, height: Math.round((320 * small.getSize().height) / small.getSize().width), quality: 'best' }) : null
+}
+
 // 托盘菜单里显示的当前歌曲封面（从封面磁盘缓存读取）
 async function coverImage(coverId) {
   if (!covers || !state.base) return null
@@ -637,7 +655,7 @@ function registerIpc() {
   ipcMain.handle('lyrics:set-style', (_e, patch) => { setLyricsStyle(patch || {}); return readPrefs().lyricsStyle || {} })
   ipcMain.handle('lyrics:reset-style', () => { if (lyricsWin) lyricsWin.resetStyle(); else writePrefs({ ...readPrefs(), lyricsStyle: {} }); return readPrefs().lyricsStyle || {} })
   ipcMain.on('lyrics:reset-position', () => lyricsWin?.resetPosition())
-  ipcMain.on('player:state', (_e, s) => { tray?.setPlayer(s); ball?.setState(s); lyricsWin?.setState(s) })
+  ipcMain.on('player:state', (_e, s) => { tray?.setPlayer(s); thumbar?.setPlayer(s); ball?.setState(s); lyricsWin?.setState(s) })
 
   ipcMain.on('win:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
   ipcMain.on('win:toggle-maximize', (e) => {
@@ -681,7 +699,11 @@ function createWindow() {
     },
   })
   if (prefs.maximized) win.maximize()
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    win.show()
+    // 窗口有了任务栏按钮才能挂缩略图工具栏；重建窗口时由这里重新挂上
+    thumbar?.attach(win)
+  })
 
   const persist = () => {
     if (win.isDestroyed()) return
@@ -751,6 +773,7 @@ if (!gotLock) {
     covers.init()
     registerProxy()
     registerIpc()
+    thumbar = createThumbar({ command: playerCommand, coverArt })
     mainWindow = createWindow()
     setupTray()
     setupBall()
